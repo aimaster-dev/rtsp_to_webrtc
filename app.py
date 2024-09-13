@@ -31,7 +31,7 @@ def generate_frames():
 # Route to render the HTML template
 @app.route('/')
 def index():
-    return render_template('index1.html')
+    return render_template('index.html')
 
 # Asynchronous function to handle offer exchange
 async def offer_async():
