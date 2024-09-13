@@ -1,53 +1,74 @@
-from flask import Flask, request, jsonify
-import requests
-import subprocess
+from flask import Flask, render_template, Response, request, jsonify
+from aiortc import RTCPeerConnection, RTCSessionDescription
+import cv2
+import json
+import uuid
+import asyncio
+import logging
+import time
 
-app = Flask(__name__)
+# Create a Flask app instance
+app = Flask(__name__, static_url_path='/static')
+# Set to keep track of RTCPeerConnection instances
+pcs = set()
+# Function to generate video frames from the camera
+def generate_frames():
+    camera = cv2.VideoCapture("rtsp://admin:Korgi123@70.41.96.204:555")
+    while True:
+        start_time = time.time()
+        success, frame = camera.read()
+        if not success:
+            break
+        else:
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            # Concatenate frame and yield for streaming
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n') 
+            elapsed_time = time.time() - start_time
+            logging.debug(f"Frame generation time: {elapsed_time} seconds")
 
-streams = {}
+# Route to render the HTML template
+@app.route('/')
+def index():
+    return render_template('index1.html')
 
-def start_ffmpeg(rtsp_url, rtp_port):
-    command = [
-        'ffmpeg',
-        '-i', rtsp_url,
-        '-f', 'rtp',
-        f'rtp://localhost:{rtp_port}'
-    ]
-    return subprocess.Popen(command)
+# Asynchronous function to handle offer exchange
+async def offer_async():
+    params = await request.json
+    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    # Create an RTCPeerConnection instance
+    pc = RTCPeerConnection()
+    # Generate a unique ID for the RTCPeerConnection
+    pc_id = "PeerConnection(%s)" % uuid.uuid4()
+    pc_id = pc_id[:8]
+    # Create a data channel named "chat"
+    # pc.createDataChannel("chat")
+    # Create and set the local description
+    await pc.createOffer(offer)
+    await pc.setLocalDescription(offer)
+    # Prepare the response data with local SDP and type
+    response_data = {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+    return jsonify(response_data)
 
-def send_offer_to_janus(sdp_offer):
-    janus_url = 'http://localhost:8088/janus'
-    response = requests.post(janus_url, json={"type": "offer", "sdp": sdp_offer})
-    return response.json()
+# Wrapper function for running the asynchronous offer function
+def offer():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    future = asyncio.run_coroutine_threadsafe(offer_async(), loop)
+    return future.result()
 
-@app.route('/api/add_camera', methods=['POST'])
-def add_camera():
-    data = request.json
-    rtsp_url = data['rtsp_url']
-    rtp_port = data['rtp_port']
-    process = start_ffmpeg(rtsp_url, rtp_port)
-    streams[rtsp_url] = process
+# Route to handle the offer request
+@app.route('/offer', methods=['POST'])
+def offer_route():
+    return offer()
 
-    return jsonify({"message": "Camera added successfully"}), 201
+# Route to stream video frames
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/api/stop_camera', methods=['POST'])
-def stop_camera():
-    data = request.json
-    rtsp_url = data['rtsp_url']
-
-    # Stop the FFmpeg process
-    if rtsp_url in streams:
-        streams[rtsp_url].terminate()
-        del streams[rtsp_url]
-
-    return jsonify({"message": "Camera stopped successfully"}), 200
-
-@app.route('/api/webrtc_offer', methods=['POST'])
-def webrtc_offer():
-    sdp_offer = request.json['sdp']
-
-    # Pass the offer to Janus (or handle SDP exchange directly)
-    # Example request to Janus:
-    janus_response = send_offer_to_janus(sdp_offer)
-
-    return jsonify(janus_response['sdp'])
+# Run the Flask app
+if __name__ == "__main__":
+    app.run(debug=True, host='0.0.0.0')
